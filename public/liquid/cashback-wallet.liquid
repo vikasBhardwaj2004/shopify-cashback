@@ -1,0 +1,242 @@
+{% comment %}
+  cashback-wallet.liquid
+  ─────────────────────────────────────────────────────────────────────────────
+  Drop this file in your theme's templates/ folder as:
+    templates/page.cashback-wallet.liquid
+
+  Then create a page in Shopify Admin → Online Store → Pages
+  and set the template to "cashback-wallet".
+
+  The page fetches wallet data from your app's API using the
+  customer's ID from the Liquid customer object.
+{% endcomment %}
+
+{{ 'cashback-wallet.css' | asset_url | stylesheet_tag }}
+
+<div class="cashback-wallet-page" id="cashback-wallet">
+
+  {% if customer %}
+
+    <div class="cw-header">
+      <h1 class="cw-title">My Cashback Wallet</h1>
+      <p class="cw-subtitle">Earn cashback on every order. Use it on your next purchase.</p>
+    </div>
+
+    <div id="cw-loading" class="cw-loading">
+      <div class="cw-spinner"></div>
+      <p>Loading your wallet...</p>
+    </div>
+
+    <div id="cw-content" style="display:none">
+
+      <!-- Balance Hero -->
+      <div class="cw-balance-card">
+        <div class="cw-balance-label">Available Balance</div>
+        <div class="cw-balance-amount" id="cw-balance">₹0.00</div>
+        <div class="cw-balance-meta" id="cw-expiry-warning"></div>
+      </div>
+
+      <!-- Metric Row -->
+      <div class="cw-metrics">
+        <div class="cw-metric">
+          <span class="cw-metric-label">Total Earned</span>
+          <span class="cw-metric-value" id="cw-earned">₹0</span>
+        </div>
+        <div class="cw-metric">
+          <span class="cw-metric-label">Total Used</span>
+          <span class="cw-metric-value" id="cw-used">₹0</span>
+        </div>
+        <div class="cw-metric cw-metric--warn">
+          <span class="cw-metric-label">Expired</span>
+          <span class="cw-metric-value" id="cw-expired">₹0</span>
+        </div>
+      </div>
+
+      <!-- Active Batches -->
+      <section class="cw-section">
+        <h2 class="cw-section-title">Active Cashback</h2>
+        <div id="cw-batches" class="cw-batch-list"></div>
+      </section>
+
+      <!-- Transaction History -->
+      <section class="cw-section">
+        <h2 class="cw-section-title">Transaction History</h2>
+        <div class="cw-filter-row">
+          <button class="cw-filter active" data-filter="ALL">All</button>
+          <button class="cw-filter" data-filter="EARN">Earned</button>
+          <button class="cw-filter" data-filter="USE">Used</button>
+          <button class="cw-filter" data-filter="EXPIRE">Expired</button>
+        </div>
+        <div id="cw-transactions" class="cw-tx-list"></div>
+      </section>
+
+      <!-- How It Works -->
+      <section class="cw-section cw-how">
+        <h2 class="cw-section-title">How It Works</h2>
+        <div class="cw-steps">
+          <div class="cw-step">
+            <div class="cw-step-icon">1</div>
+            <div>
+              <strong>First Order</strong>
+              <p>Get 30% + extra 10% off MRP. 100% cashback (excl. GST) added to your wallet.</p>
+            </div>
+          </div>
+          <div class="cw-step">
+            <div class="cw-step-icon">2</div>
+            <div>
+              <strong>Use Your Cashback</strong>
+              <p>On your next order, use up to 40% of the product value from your wallet.</p>
+            </div>
+          </div>
+          <div class="cw-step">
+            <div class="cw-step-icon">3</div>
+            <div>
+              <strong>30-Day Validity</strong>
+              <p>Each cashback batch is valid for 30 days. Unused cashback expires automatically.</p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+    </div>
+
+    <div id="cw-error" class="cw-error" style="display:none">
+      <p>Unable to load wallet. Please try again later.</p>
+    </div>
+
+  {% else %}
+
+    <div class="cw-login-prompt">
+      <h2>Please log in to view your wallet</h2>
+      <a href="/account/login?return_url=/pages/cashback-wallet" class="cw-btn">Log In</a>
+    </div>
+
+  {% endif %}
+
+</div>
+
+<script>
+(function() {
+  {% if customer %}
+  const CUSTOMER_ID = 'gid://shopify/Customer/{{ customer.id }}';
+  const SHOP_DOMAIN = '{{ shop.permanent_domain }}';
+  const APP_URL = '{{ settings.cashback_app_url }}'; // set in theme settings
+
+  const fmt = (n) => '₹' + parseFloat(n).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const fmtDate = (d) => new Date(d).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
+
+  let allTransactions = [];
+  let activeFilter = 'ALL';
+
+  async function loadWallet() {
+    try {
+      const res = await fetch(
+        `${APP_URL}/api/wallet/${encodeURIComponent(CUSTOMER_ID)}`,
+        { headers: { 'x-shopify-shop-domain': SHOP_DOMAIN } }
+      );
+      if (!res.ok) throw new Error('API error');
+      const data = await res.json();
+
+      document.getElementById('cw-loading').style.display = 'none';
+      document.getElementById('cw-content').style.display = 'block';
+
+      // Balance
+      document.getElementById('cw-balance').textContent = fmt(data.balance);
+      document.getElementById('cw-earned').textContent = fmt(data.totalEarned);
+      document.getElementById('cw-used').textContent = fmt(data.totalUsed);
+      document.getElementById('cw-expired').textContent = fmt(data.totalExpired);
+
+      // Expiry warning
+      const soonBatch = data.activeBatches.find(b => b.daysLeft <= 5);
+      if (soonBatch) {
+        document.getElementById('cw-expiry-warning').innerHTML =
+          `⚠️ ₹${soonBatch.remaining} expires in ${soonBatch.daysLeft} day${soonBatch.daysLeft === 1 ? '' : 's'}!`;
+      }
+
+      // Batches
+      const batchContainer = document.getElementById('cw-batches');
+      if (data.activeBatches.length === 0) {
+        batchContainer.innerHTML = '<p class="cw-empty">No active cashback. Place an order to earn!</p>';
+      } else {
+        batchContainer.innerHTML = data.activeBatches.map(b => {
+          const pct = Math.round(((b.originalAmount - b.remaining) / b.originalAmount) * 100);
+          const urgency = b.daysLeft <= 5 ? 'danger' : b.daysLeft <= 10 ? 'warn' : 'ok';
+          return `
+            <div class="cw-batch cw-batch--${urgency}">
+              <div class="cw-batch-top">
+                <div>
+                  <span class="cw-batch-ref">${b.batchRef}</span>
+                  <span class="cw-badge cw-badge--${b.orderType === 'FIRST' ? 'blue' : 'green'}">
+                    ${b.orderType === 'FIRST' ? 'First Order' : 'Order'}
+                  </span>
+                  <span class="cw-batch-order">${b.orderName}</span>
+                </div>
+                <span class="cw-batch-amount">${fmt(b.remaining)}</span>
+              </div>
+              <div class="cw-batch-meta">
+                Earned ${fmtDate(b.earnedAt)} · Expires ${fmtDate(b.expiresAt)} · ${b.daysLeft} day${b.daysLeft === 1 ? '' : 's'} left
+              </div>
+              <div class="cw-bar-wrap">
+                <div class="cw-bar">
+                  <div class="cw-bar-fill cw-bar-fill--${urgency}" style="width:${100 - pct}%"></div>
+                </div>
+              </div>
+            </div>`;
+        }).join('');
+      }
+
+      // Transactions
+      allTransactions = data.transactions;
+      renderTransactions();
+
+    } catch (e) {
+      document.getElementById('cw-loading').style.display = 'none';
+      document.getElementById('cw-error').style.display = 'block';
+    }
+  }
+
+  function renderTransactions() {
+    const filtered = activeFilter === 'ALL'
+      ? allTransactions
+      : allTransactions.filter(t => t.type === activeFilter);
+
+    const container = document.getElementById('cw-transactions');
+    if (filtered.length === 0) {
+      container.innerHTML = '<p class="cw-empty">No transactions found.</p>';
+      return;
+    }
+
+    const typeLabel = { EARN: 'Earned', USE: 'Used', EXPIRE: 'Expired', REFUND: 'Refunded' };
+    const typeClass = { EARN: 'earn', USE: 'use', EXPIRE: 'expire', REFUND: 'refund' };
+    const typeSign  = { EARN: '+', USE: '−', EXPIRE: '−', REFUND: '+' };
+
+    container.innerHTML = filtered.map(t => `
+      <div class="cw-tx">
+        <div class="cw-tx-icon cw-tx-icon--${typeClass[t.type]}">
+          ${t.type === 'EARN' ? '↑' : t.type === 'USE' ? '↓' : t.type === 'EXPIRE' ? '⊘' : '↩'}
+        </div>
+        <div class="cw-tx-info">
+          <div class="cw-tx-label">${t.note || typeLabel[t.type]}</div>
+          <div class="cw-tx-date">${fmtDate(t.createdAt)}${t.orderName ? ' · ' + t.orderName : ''}</div>
+        </div>
+        <div class="cw-tx-amount cw-tx-amount--${typeClass[t.type]}">
+          ${typeSign[t.type]}${fmt(t.amount)}
+        </div>
+      </div>
+    `).join('');
+  }
+
+  // Filter buttons
+  document.querySelectorAll('.cw-filter').forEach(btn => {
+    btn.addEventListener('click', function() {
+      document.querySelectorAll('.cw-filter').forEach(b => b.classList.remove('active'));
+      this.classList.add('active');
+      activeFilter = this.dataset.filter;
+      renderTransactions();
+    });
+  });
+
+  loadWallet();
+  {% endif %}
+})();
+</script>

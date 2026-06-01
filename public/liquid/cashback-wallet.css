@@ -1,0 +1,166 @@
+/* assets/cashback-wallet.css */
+/* Drop this in your Shopify theme's assets/ folder */
+
+.cashback-wallet-page {
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 2rem 1rem;
+  font-family: inherit;
+}
+
+/* Header */
+.cw-title { font-size: 1.75rem; font-weight: 600; margin-bottom: 0.25rem; }
+.cw-subtitle { color: #666; margin-bottom: 2rem; }
+.cw-loading { text-align: center; padding: 3rem; color: #888; }
+.cw-spinner {
+  width: 32px; height: 32px;
+  border: 3px solid #eee;
+  border-top-color: #1D9E75;
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+  margin: 0 auto 1rem;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* Balance Card */
+.cw-balance-card {
+  background: #E1F5EE;
+  border: 1px solid #5DCAA5;
+  border-radius: 12px;
+  padding: 1.5rem;
+  margin-bottom: 1.25rem;
+  text-align: center;
+}
+.cw-balance-label { font-size: 0.875rem; color: #0F6E56; margin-bottom: 0.25rem; }
+.cw-balance-amount { font-size: 2.5rem; font-weight: 700; color: #085041; }
+.cw-balance-meta { font-size: 0.875rem; color: #BA7517; margin-top: 0.5rem; }
+
+/* Metrics */
+.cw-metrics {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+  margin-bottom: 2rem;
+}
+.cw-metric {
+  background: #f5f5f5;
+  border-radius: 8px;
+  padding: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.cw-metric--warn .cw-metric-value { color: #A32D2D; }
+.cw-metric-label { font-size: 0.75rem; color: #777; }
+.cw-metric-value { font-size: 1.25rem; font-weight: 600; }
+
+/* Section */
+.cw-section { margin-bottom: 2rem; }
+.cw-section-title { font-size: 1rem; font-weight: 600; margin-bottom: 1rem; color: #222; }
+
+/* Batch Cards */
+.cw-batch {
+  background: #fff;
+  border: 1px solid #e0e0e0;
+  border-radius: 8px;
+  padding: 1rem;
+  margin-bottom: 10px;
+}
+.cw-batch--warn { border-color: #F0997B; }
+.cw-batch--danger { border-color: #E24B4A; }
+.cw-batch-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 6px;
+}
+.cw-batch-ref { font-weight: 600; font-size: 0.875rem; margin-right: 8px; }
+.cw-batch-order { font-size: 0.8rem; color: #666; margin-left: 6px; }
+.cw-batch-amount { font-size: 1.1rem; font-weight: 700; color: #085041; }
+.cw-batch-meta { font-size: 0.78rem; color: #888; margin-bottom: 8px; }
+.cw-bar-wrap { }
+.cw-bar { background: #eee; border-radius: 4px; height: 6px; overflow: hidden; }
+.cw-bar-fill { height: 100%; border-radius: 4px; transition: width 0.4s; }
+.cw-bar-fill--ok { background: #1D9E75; }
+.cw-bar-fill--warn { background: #BA7517; }
+.cw-bar-fill--danger { background: #E24B4A; }
+
+/* Badges */
+.cw-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 100px;
+  font-size: 0.7rem;
+  font-weight: 500;
+}
+.cw-badge--blue { background: #E6F1FB; color: #042C53; }
+.cw-badge--green { background: #E1F5EE; color: #085041; }
+
+/* Filter row */
+.cw-filter-row { display: flex; gap: 8px; margin-bottom: 1rem; flex-wrap: wrap; }
+.cw-filter {
+  padding: 5px 14px;
+  border: 1px solid #ddd;
+  border-radius: 100px;
+  background: #fff;
+  cursor: pointer;
+  font-size: 0.8rem;
+  color: #555;
+}
+.cw-filter.active { background: #1D9E75; border-color: #1D9E75; color: #fff; }
+
+/* Transaction List */
+.cw-tx {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 0;
+  border-bottom: 1px solid #f0f0f0;
+}
+.cw-tx:last-child { border-bottom: none; }
+.cw-tx-icon {
+  width: 36px; height: 36px;
+  border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 1rem; font-weight: 700; flex-shrink: 0;
+}
+.cw-tx-icon--earn { background: #E1F5EE; color: #085041; }
+.cw-tx-icon--use { background: #FAEEDA; color: #412402; }
+.cw-tx-icon--expire { background: #FCEBEB; color: #501313; }
+.cw-tx-icon--refund { background: #E6F1FB; color: #042C53; }
+.cw-tx-info { flex: 1; }
+.cw-tx-label { font-size: 0.875rem; color: #222; }
+.cw-tx-date { font-size: 0.75rem; color: #888; margin-top: 2px; }
+.cw-tx-amount { font-size: 0.95rem; font-weight: 600; white-space: nowrap; }
+.cw-tx-amount--earn { color: #085041; }
+.cw-tx-amount--use { color: #412402; }
+.cw-tx-amount--expire { color: #A32D2D; }
+.cw-tx-amount--refund { color: #042C53; }
+
+/* How It Works */
+.cw-how { background: #fafafa; border-radius: 12px; padding: 1.5rem; }
+.cw-steps { display: flex; flex-direction: column; gap: 1rem; }
+.cw-step { display: flex; align-items: flex-start; gap: 1rem; }
+.cw-step-icon {
+  width: 32px; height: 32px;
+  border-radius: 50%; background: #1D9E75; color: #fff;
+  display: flex; align-items: center; justify-content: center;
+  font-weight: 700; font-size: 0.9rem; flex-shrink: 0;
+}
+.cw-step p { font-size: 0.875rem; color: #555; margin: 4px 0 0; }
+
+/* Misc */
+.cw-empty { color: #999; font-size: 0.875rem; padding: 1rem 0; }
+.cw-error { text-align: center; padding: 2rem; color: #A32D2D; }
+.cw-login-prompt { text-align: center; padding: 3rem; }
+.cw-btn {
+  display: inline-block; padding: 10px 24px;
+  background: #1D9E75; color: #fff; border-radius: 8px;
+  text-decoration: none; margin-top: 1rem;
+}
+
+/* Responsive */
+@media (max-width: 480px) {
+  .cw-metrics { grid-template-columns: 1fr 1fr; }
+  .cw-balance-amount { font-size: 2rem; }
+}

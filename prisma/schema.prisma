@@ -1,0 +1,142 @@
+// prisma/schema.prisma
+// Run: npx prisma migrate dev --name init
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── Shop ─────────────────────────────────────────────────────────────────────
+model Shop {
+  id           String   @id @default(cuid())
+  domain       String   @unique
+  accessToken  String
+  isActive     Boolean  @default(true)
+  installedAt  DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  wallets      Wallet[]
+  settings     CashbackSettings?
+
+  @@index([domain])
+}
+
+// ─── Cashback Settings (per shop) ────────────────────────────────────────────
+model CashbackSettings {
+  id                    String  @id @default(cuid())
+  shopId                String  @unique
+  shop                  Shop    @relation(fields: [shopId], references: [id], onDelete: Cascade)
+
+  // Discount rules
+  mrpDiscountPercent    Float   @default(30)     // 30% off MRP
+  firstOrderExtraDisc   Float   @default(10)     // extra 10% for first order
+
+  // Cashback rules
+  firstOrderCashbackPct Float   @default(100)    // 100% cashback on first order (excl GST)
+  repeatCashbackPct     Float   @default(100)    // cashback % on repeat orders (excl GST)
+
+  // Wallet usage limits
+  maxWalletUsagePctOfProduct Float @default(40)  // max 40% of product value
+  maxWalletUsagePctOfBalance Float @default(33)  // max 33% of wallet balance
+
+  // Expiry
+  cashbackValidDays     Int     @default(30)     // cashback valid for 30 days
+
+  // GST
+  defaultGstRate        Float   @default(18)
+
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+}
+
+// ─── Wallet (one per customer per shop) ──────────────────────────────────────
+model Wallet {
+  id                String          @id @default(cuid())
+  shopId            String
+  shop              Shop            @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  customerId        String          // Shopify customer GID
+  customerEmail     String
+  totalEarned       Float           @default(0)
+  totalUsed         Float           @default(0)
+  totalExpired      Float           @default(0)
+
+  batches           CashbackBatch[]
+  transactions      WalletTransaction[]
+
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+
+  @@unique([shopId, customerId])
+  @@index([shopId, customerId])
+}
+
+// ─── Cashback Batch (one per qualifying order) ───────────────────────────────
+model CashbackBatch {
+  id              String        @id @default(cuid())
+  batchRef        String        @unique // e.g. CB-0042
+  walletId        String
+  wallet          Wallet        @relation(fields: [walletId], references: [id], onDelete: Cascade)
+
+  orderId         String        // Shopify order GID
+  orderName       String        // e.g. #1043
+  orderType       OrderType     // FIRST or REPEAT
+
+  originalAmount  Float         // cashback credited
+  usedAmount      Float         @default(0)
+  expiredAmount   Float         @default(0)
+
+  earnedAt        DateTime      @default(now())
+  expiresAt       DateTime      // earnedAt + 30 days
+  status          BatchStatus   @default(ACTIVE)
+
+  transactions    WalletTransaction[]
+
+  @@index([walletId, status])
+  @@index([expiresAt, status])
+}
+
+// ─── Wallet Transaction (audit log) ──────────────────────────────────────────
+model WalletTransaction {
+  id          String          @id @default(cuid())
+  walletId    String
+  wallet      Wallet          @relation(fields: [walletId], references: [id], onDelete: Cascade)
+  batchId     String?
+  batch       CashbackBatch?  @relation(fields: [batchId], references: [id])
+
+  type        TransactionType
+  amount      Float
+  balanceBefore Float
+  balanceAfter  Float
+
+  orderId     String?
+  orderName   String?
+  note        String?
+
+  createdAt   DateTime        @default(now())
+
+  @@index([walletId, createdAt])
+}
+
+// ─── Enums ────────────────────────────────────────────────────────────────────
+enum OrderType {
+  FIRST
+  REPEAT
+}
+
+enum BatchStatus {
+  ACTIVE
+  PARTIALLY_USED
+  FULLY_USED
+  EXPIRED
+}
+
+enum TransactionType {
+  EARN
+  USE
+  EXPIRE
+  REFUND
+}
