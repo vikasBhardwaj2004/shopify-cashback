@@ -29,7 +29,11 @@ const shopify = shopifyApi({
 app.set("shopify", shopify);
 
 app.use(helmet({ contentSecurityPolicy: false }));
-app.use(cors());
+app.use(cors({
+  origin: '*',
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'x-shopify-shop-domain']
+}));
 app.use(morgan("combined", { stream: { write: (msg) => logger.info(msg.trim()) } }));
 
 app.use(
