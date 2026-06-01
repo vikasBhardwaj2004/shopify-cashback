@@ -14,6 +14,15 @@ const cashbackService = require("../services/cashback.service");
 const { validateShopSession } = require("../middleware/auth.middleware");
 const logger = require("../utils/logger");
 
+// ── CORS — allow Shopify storefront to call this API ─────────────────────────
+router.use((req, res, next) => {
+  res.header("Access-Control-Allow-Origin", "*");
+  res.header("Access-Control-Allow-Headers", "Content-Type, x-shopify-shop-domain");
+  res.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  if (req.method === "OPTIONS") return res.sendStatus(200);
+  next();
+});
+
 // All wallet routes require a valid Shopify session header
 router.use(validateShopSession);
 
