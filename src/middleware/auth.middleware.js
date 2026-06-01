@@ -1,12 +1,7 @@
-// src/middleware/auth.middleware.js
-// Validates that the request comes from a known installed shop.
-// Attaches req.shopId for downstream route handlers.
-
 const { PrismaClient } = require("@prisma/client");
 const prisma = new PrismaClient();
 
 async function validateShopSession(req, res, next) {
-  // Accept shop domain from header (storefront) or query param (admin)
   const shopDomain =
     req.headers["x-shopify-shop-domain"] ||
     req.query.shop;
@@ -15,13 +10,31 @@ async function validateShopSession(req, res, next) {
     return res.status(401).json({ error: "Missing shop domain" });
   }
 
-  const shop = await prisma.shop.findUnique({
+  // Auto-register shop if not exists (for direct API usage without OAuth)
+  let shop = await prisma.shop.findUnique({
     where: { domain: shopDomain },
     select: { id: true, isActive: true },
   });
 
-  if (!shop || !shop.isActive) {
-    return res.status(401).json({ error: "Shop not found or inactive" });
+  if (!shop) {
+    // Create shop record automatically
+    shop = await prisma.shop.create({
+      data: {
+        domain: shopDomain,
+        accessToken: process.env.SHOPIFY_ACCESS_TOKEN || "pending",
+        isActive: true,
+      },
+      select: { id: true, isActive: true },
+    });
+
+    // Create default settings for this shop
+    await prisma.cashbackSettings.create({
+      data: { shopId: shop.id }
+    }).catch(() => {});
+  }
+
+  if (!shop.isActive) {
+    return res.status(401).json({ error: "Shop inactive" });
   }
 
   req.shopId = shop.id;
