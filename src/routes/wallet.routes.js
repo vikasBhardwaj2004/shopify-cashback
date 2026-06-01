@@ -37,6 +37,11 @@ router.get("/:customerId", async (req, res) => {
     customerId: decodeURIComponent(customerId),
   });
 
+  summary.totalEarned  = summary.totalEarned  || 0;
+  summary.totalUsed    = summary.totalUsed    || 0;
+  summary.totalExpired = summary.totalExpired || 0;
+  summary.balance      = summary.balance      || 0;
+
   res.json(summary);
 });
 
