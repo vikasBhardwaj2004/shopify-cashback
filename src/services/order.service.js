@@ -61,11 +61,22 @@ logger.info("ORDER TAX DEBUG", {
 });
   
   // ── Calculate cashback ────────────────────────────────────────────────────
-  const { cashbackAmount, breakdown } = cashbackService.calculateOrderCashback({
-    subtotal,
-    totalTax,
-    isFirstOrder: firstOrder,
-  });
+  // const { cashbackAmount, breakdown } = cashbackService.calculateOrderCashback({
+  //   subtotal,
+  //   totalTax,
+  //   isFirstOrder: firstOrder,
+  // });
+
+
+  const gstRate =
+  order.line_items?.[0]?.tax_lines?.[0]?.rate || 0;
+
+const { cashbackAmount, breakdown } = cashbackService.calculateOrderCashback({
+  subtotal,
+  totalTax,
+  gstRate,
+  isFirstOrder: firstOrder,
+});
 
   logger.info(`Order ${orderName} cashback breakdown`, {
     customerId,
