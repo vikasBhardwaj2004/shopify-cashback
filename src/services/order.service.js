@@ -38,11 +38,28 @@ async function handleOrderPaid({ shopId, shopDomain, order }) {
   // ── Extract financial data from Shopify webhook ───────────────────────────
   // subtotal_price = product total (tax-inclusive), Shopify sends as string
   // total_tax      = actual GST charged by Shopify, also a string
-  const subtotal = parseFloat(order.subtotal_price || "0");
-  const totalTax = parseFloat(order.total_tax || "0");
+  // const subtotal = parseFloat(order.subtotal_price || "0");
+  // const totalTax = parseFloat(order.total_tax || "0");
 
-  logger.info(`Order ${orderName} | subtotal: ₹${subtotal} | tax: ₹${totalTax} | firstOrder: ${firstOrder}`);
+  // logger.info(`Order ${orderName} | subtotal: ₹${subtotal} | tax: ₹${totalTax} | firstOrder: ${firstOrder}`);
 
+
+const subtotal = parseFloat(order.subtotal_price || "0");
+const totalTax = parseFloat(order.total_tax || "0");
+
+logger.info(`Order ${orderName} | subtotal: ₹${subtotal} | tax: ₹${totalTax} | firstOrder: ${firstOrder}`);
+
+// DEBUG: Check actual tax data coming from Shopify
+logger.info("ORDER TAX DEBUG", {
+  orderId: order.id,
+  orderName: order.name,
+  subtotal_price: order.subtotal_price,
+  total_tax: order.total_tax,
+  taxes_included: order.taxes_included,
+  tax_lines: order.tax_lines,
+  line_items: order.line_items,
+});
+  
   // ── Calculate cashback ────────────────────────────────────────────────────
   const { cashbackAmount, breakdown } = cashbackService.calculateOrderCashback({
     subtotal,
