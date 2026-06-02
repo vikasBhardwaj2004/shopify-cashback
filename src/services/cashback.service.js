@@ -114,7 +114,7 @@ function calculateOrderCashback({
   }
 
   // Step 3: Price excluding GST
-  // const priceExclGst = parseFloat((discountedPrice - scaledTax).
+  // const priceExclGst = parseFloat((discountedPrice - scaledTax).toFixed(2));
   
   let priceExclGst;
 
@@ -128,7 +128,7 @@ if (totalTax > 0) {
   );
 } else {
   priceExclGst = discountedPrice;
-}toFixed(2));
+}
 
   // Step 4: Cashback = 100% of price excl. GST
   const cashbackAmount = parseFloat((priceExclGst * (CASHBACK_PCT / 100)).toFixed(2));
