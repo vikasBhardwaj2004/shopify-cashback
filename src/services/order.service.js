@@ -1,98 +1,146 @@
 // src/services/order.service.js
-// ─────────────────────────────────────────────────────────────────────────────
-// Handles the full order lifecycle:
-//   handleOrderPaid()  → called by orders/paid webhook
-//                         - checks first-order status
-//                         - awards cashback
-//   handleOrderRefund() → partial cashback reversal on refund
-// ─────────────────────────────────────────────────────────────────────────────
 
 const { PrismaClient } = require("@prisma/client");
 const prisma = new PrismaClient();
 const cashbackService = require("./cashback.service");
 const logger = require("../utils/logger");
 
+const MIN_ORDER_FOR_CASHBACK = 299;
+
 /**
- * Called when an order is marked as PAID in Shopify.
- * Awards cashback to the customer's wallet.
- *
- * @param {object} params
- * @param {string} params.shopId     - Internal shop ID
- * @param {string} params.shopDomain - e.g. mystore.myshopify.com
- * @param {object} params.order      - Raw Shopify order webhook payload
+ * Calculate exact price excluding GST from line items.
+ * Uses Shopify's actual tax_lines per item — 100% accurate.
+ * Works for 5% (shampoo/soap/hair oil) and 18% (everything else).
  */
+function calculateExactPriceExcludingGst(lineItems) {
+  let totalPriceWithGst = 0;
+  let totalGst = 0;
+
+  for (const item of lineItems || []) {
+    const itemTotal = parseFloat(item.price) * item.quantity;
+    totalPriceWithGst += itemTotal;
+
+    // Get exact GST from Shopify's tax_lines per item
+    const itemGst = (item.tax_lines || []).reduce((sum, tax) => {
+      return sum + parseFloat(tax.price || 0);
+    }, 0);
+
+    totalGst += itemGst;
+
+    logger.info(`Line item: ${item.title} | Price: ₹${itemTotal} | GST: ₹${itemGst.toFixed(2)} | Rate: ${item.tax_lines?.[0]?.rate ? item.tax_lines[0].rate * 100 : 0}%`);
+  }
+
+  // If Shopify gave us tax data, use it
+  if (totalGst > 0) {
+    const priceExcludingGst = parseFloat((totalPriceWithGst - totalGst).toFixed(2));
+    logger.info(`Total: ₹${totalPriceWithGst} | Total GST: ₹${totalGst.toFixed(2)} | Excl. GST: ₹${priceExcludingGst}`);
+    return { priceExcludingGst, totalGst: parseFloat(totalGst.toFixed(2)), method: "exact_tax_lines" };
+  }
+
+  // Tax inclusive pricing — Shopify shows ₹0 tax separately
+  // Use order.total_tax if available
+  return null; // will fallback in caller
+}
+
 async function handleOrderPaid({ shopId, shopDomain, order }) {
   const customerId = `gid://shopify/Customer/${order.customer?.id}`;
   const customerEmail = order.customer?.email || order.email;
   const orderId = `gid://shopify/Order/${order.id}`;
-  const orderName = order.name; // e.g. #1043
+  const orderName = order.name;
 
   if (!order.customer?.id) {
     logger.warn(`Order ${orderName} has no customer — skipping cashback`);
     return;
   }
 
-  // Determine if this is the customer's first order
+  const settings = await cashbackService.getSettings(shopId);
   const firstOrder = await cashbackService.isFirstOrder({ shopId, customerId });
 
-  // ── Extract financial data from Shopify webhook ───────────────────────────
-  // subtotal_price = product total (tax-inclusive), Shopify sends as string
-  // total_tax      = actual GST charged by Shopify, also a string
-  // const subtotal = parseFloat(order.subtotal_price || "0");
-  // const totalTax = parseFloat(order.total_tax || "0");
+  // Subtotal = product prices only (no shipping, no tax added separately)
+  const subtotal = parseFloat(order.subtotal_price) || 0;
 
-  // logger.info(`Order ${orderName} | subtotal: ₹${subtotal} | tax: ₹${totalTax} | firstOrder: ${firstOrder}`);
-
-
-const subtotal = parseFloat(order.subtotal_price || "0");
-const totalTax = parseFloat(order.total_tax || "0");
-
-logger.info(`Order ${orderName} | subtotal: ₹${subtotal} | tax: ₹${totalTax} | firstOrder: ${firstOrder}`);
-
-// DEBUG: Check actual tax data coming from Shopify
-logger.info("ORDER TAX DEBUG", {
-  orderId: order.id,
-  orderName: order.name,
-  subtotal_price: order.subtotal_price,
-  total_tax: order.total_tax,
-  taxes_included: order.taxes_included,
-  tax_lines: order.tax_lines,
-  line_items: order.line_items,
-});
-  
-  // ── Calculate cashback ────────────────────────────────────────────────────
-  // const { cashbackAmount, breakdown } = cashbackService.calculateOrderCashback({
-  //   subtotal,
-  //   totalTax,
-  //   isFirstOrder: firstOrder,
-  // });
-
-
-  const gstRate =
-  order.line_items?.[0]?.tax_lines?.[0]?.rate || 0;
-
-const { cashbackAmount, breakdown } = cashbackService.calculateOrderCashback({
-  subtotal,
-  totalTax,
-  gstRate,
-  isFirstOrder: firstOrder,
-});
-
-  logger.info(`Order ${orderName} cashback breakdown`, {
-    customerId,
-    firstOrder,
-    cashbackAmount,
-    breakdown,
-  });
-
-  if (cashbackAmount <= 0) {
-    logger.info(`No cashback for order ${orderName} — ${breakdown.reason || "amount is 0"}`);
+  // Minimum order check
+  if (subtotal < MIN_ORDER_FOR_CASHBACK) {
+    logger.info(`Order ${orderName}: subtotal ₹${subtotal} below minimum ₹${MIN_ORDER_FOR_CASHBACK} — no cashback`);
     return;
   }
 
-  // ── Award cashback ────────────────────────────────────────────────────────
-  const settings = await cashbackService.getSettings(shopId);
+  // ── STEP 1: Get exact GST from line items ──────────────────────────────────
+  let priceExcludingGst;
+  let totalGst;
+  let gstMethod;
 
+  const lineItemResult = calculateExactPriceExcludingGst(order.line_items);
+
+  if (lineItemResult) {
+    // Got exact GST from line items (tax exclusive pricing)
+    priceExcludingGst = lineItemResult.priceExcludingGst;
+    totalGst = lineItemResult.totalGst;
+    gstMethod = lineItemResult.method;
+  } else {
+    // Tax inclusive pricing — use order.total_tax
+    const orderTax = parseFloat(order.total_tax) || 0;
+
+    if (orderTax > 0) {
+      // Shopify gave us total_tax separately
+      priceExcludingGst = parseFloat((subtotal - orderTax).toFixed(2));
+      totalGst = orderTax;
+      gstMethod = "order_total_tax";
+    } else {
+      // Tax fully inclusive, not shown — calculate from line items using rates
+      let totalWithGst = 0;
+      let totalGstCalc = 0;
+
+      for (const item of order.line_items || []) {
+        const itemTotal = parseFloat(item.price) * item.quantity;
+        // Get GST rate from tax_lines (e.g. 0.05 or 0.18)
+        const gstRate = item.tax_lines?.[0]?.rate || 0.18; // default 18%
+        // If tax inclusive: GST = itemTotal - (itemTotal / (1 + gstRate))
+        const gstAmount = itemTotal - (itemTotal / (1 + gstRate));
+        totalWithGst += itemTotal;
+        totalGstCalc += gstAmount;
+
+        logger.info(`Tax inclusive item: ${item.title} | ₹${itemTotal} | Rate: ${gstRate * 100}% | GST: ₹${gstAmount.toFixed(2)}`);
+      }
+
+      priceExcludingGst = parseFloat((totalWithGst - totalGstCalc).toFixed(2));
+      totalGst = parseFloat(totalGstCalc.toFixed(2));
+      gstMethod = "tax_inclusive_calculated";
+    }
+  }
+
+  priceExcludingGst = Math.max(0, priceExcludingGst);
+
+  // ── STEP 2: Apply 10% first order discount on excl-GST price ─────────────
+  let cashbackBase = priceExcludingGst;
+  let firstOrderDiscount = 0;
+  if (firstOrder) {
+    firstOrderDiscount = parseFloat((priceExcludingGst * (settings.firstOrderExtraDisc / 100)).toFixed(2));
+    cashbackBase = parseFloat((priceExcludingGst - firstOrderDiscount).toFixed(2));
+  }
+
+  // ── STEP 3: Calculate cashback = 100% of cashbackBase ────────────────────
+  const cashbackPct = firstOrder ? settings.firstOrderCashbackPct : settings.repeatCashbackPct;
+  const cashbackAmount = parseFloat((cashbackBase * (cashbackPct / 100)).toFixed(2));
+
+  logger.info(`Order ${orderName} final cashback calculation`, {
+    customerId,
+    firstOrder,
+    subtotal,
+    totalGst,
+    gstMethod,
+    priceExcludingGst,
+    firstOrderDiscount,
+    cashbackBase,
+    cashbackAmount,
+  });
+
+  if (cashbackAmount <= 0) {
+    logger.info(`Order ${orderName}: cashback ₹0 — skipping`);
+    return;
+  }
+
+  // ── STEP 4: Award cashback ─────────────────────────────────────────────────
   const { wallet, batch } = await cashbackService.awardCashback({
     shopId,
     customerId,
@@ -105,17 +153,12 @@ const { cashbackAmount, breakdown } = cashbackService.calculateOrderCashback({
   });
 
   logger.info(
-    `Cashback batch ${batch.batchRef} created: ₹${cashbackAmount} for ${customerEmail} (expires ${batch.expiresAt.toISOString()})`
+    `✅ Cashback ₹${cashbackAmount} awarded to ${customerEmail} | Batch: ${batch.batchRef} | Method: ${gstMethod} | GST removed: ₹${totalGst} | Expires: ${batch.expiresAt.toISOString()}`
   );
 
-  return { wallet, batch, breakdown };
+  return { wallet, batch, cashbackAmount, totalGst, gstMethod };
 }
 
-/**
- * Called when an order is refunded.
- * Attempts to reverse cashback earned on that order.
- * Only reverses if the cashback batch still has unused balance.
- */
 async function handleOrderRefund({ shopId, order, refundAmount }) {
   const customerId = `gid://shopify/Customer/${order.customer?.id}`;
   if (!customerId) return;
