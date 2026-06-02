@@ -1,165 +1,377 @@
 // src/services/cashback.service.js
 // ─────────────────────────────────────────────────────────────────────────────
-// All cashback business logic:
-// - calculateOrderCashback() → cashback earned on an order
-// - calculateWalletUsage()   → how much wallet can be applied at checkout
-//
-// Rules:
-//   1. Cashback only on products ₹299+
-//   2. GST deducted using Shopify's actual total_tax (no assumption)
-//   3. First order → 10% extra discount THEN cashback on remaining excl. GST
-//   4. 2nd+ orders → no extra discount, cashback on price excl. GST
-//   5. Wallet use (2nd+ orders): customer can use MAX of:
-//        Option A → 40% of product value (excl. GST)
-//        Option B → 33% of wallet balance
+// All cashback business logic lives here:
+//  - calculateOrderCashback()  → what cashback will be earned
+//  - calculateWalletUsage()    → how much wallet can be applied
+//  - awardCashback()           → write earned cashback to DB
+//  - redeemCashback()          → deduct from wallet batches (FIFO)
+//  - getWalletBalance()        → sum of non-expired active batches
+//  - getWalletSummary()        → full wallet + batches + transactions
 // ─────────────────────────────────────────────────────────────────────────────
 
-const db = require('../config/database');
+const { PrismaClient } = require("@prisma/client");
+const prisma = new PrismaClient();
+const logger = require("../utils/logger");
+const { generateBatchRef } = require("../utils/helpers");
 
-// ── Settings (can be moved to DB / env later) ────────────────────────────────
-const SETTINGS = {
-  minOrderValue:        299,   // cashback only if product price >= ₹299
-  firstOrderExtraDisc:  10,    // % extra discount on first order
-  firstOrderCashbackPct:100,   // % cashback of price-excl-GST (1st order)
-  repeatCashbackPct:   100,    // % cashback of price-excl-GST (repeat orders)
-  walletUsagePctOfProduct: 40, // Option A: max % of product value (excl GST)
-  walletUsagePctOfBalance: 33, // Option B: max % of wallet balance
-  cashbackExpiryDays:   30,    // days before cashback expires
-};
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
-// ─────────────────────────────────────────────────────────────────────────────
-// calculateOrderCashback()
-//
-// @param {object} params
-//   - subtotal      {number}  order subtotal (tax-inclusive, from Shopify)
-//   - totalTax      {number}  actual GST amount from Shopify webhook
-//   - isFirstOrder  {boolean}
-//
-// @returns {object}
-//   - cashbackAmount   {number}
-//   - breakdown        {object}  full audit trail
-// ─────────────────────────────────────────────────────────────────────────────
+/**
+ * Get shop settings, falling back to defaults if not configured.
+ */
+async function getSettings(shopId) {
+  const settings = await prisma.cashbackSettings.findUnique({ where: { shopId } });
+  if (settings) return settings;
+  return {
+    firstOrderExtraDisc: 10,
+    firstOrderCashbackPct: 100,
+    repeatCashbackPct: 100,
+    maxWalletUsagePctOfProduct: 40,
+    maxWalletUsagePctOfBalance: 33,
+    cashbackValidDays: 30,
+    minOrderValue: 299,
+  };
+}
+
+/**
+ * Get or create wallet for a customer.
+ */
+async function getOrCreateWallet(shopId, customerId, customerEmail) {
+  return prisma.wallet.upsert({
+    where: { shopId_customerId: { shopId, customerId } },
+    update: {},
+    create: { shopId, customerId, customerEmail },
+  });
+}
+
+/**
+ * Sum of all ACTIVE batch remaining amounts for a wallet.
+ * Only counts non-expired batches.
+ */
+async function getWalletBalance(walletId) {
+  const batches = await prisma.cashbackBatch.findMany({
+    where: {
+      walletId,
+      status: { in: ["ACTIVE", "PARTIALLY_USED"] },
+      expiresAt: { gt: new Date() },
+    },
+  });
+  return batches.reduce((sum, b) => sum + (b.originalAmount - b.usedAmount - b.expiredAmount), 0);
+}
+
+// ── Core Calculation Functions ────────────────────────────────────────────────
+
+/**
+ * Calculate cashback for an order.
+ *
+ * Rules:
+ *  - No cashback if subtotal < ₹299
+ *  - No 30% discount here — Shopify handles discounts
+ *  - First order: 10% extra discount applied, then cashback on price excl. GST
+ *  - Repeat orders: cashback directly on price excl. GST (no extra discount)
+ *  - GST deducted using Shopify's actual total_tax (no assumption)
+ *
+ * @param {object} params
+ * @param {number}  params.subtotal      - Order subtotal from Shopify (tax-inclusive)
+ * @param {number}  params.totalTax      - Actual GST amount from Shopify webhook
+ * @param {boolean} params.isFirstOrder  - Whether this is the customer's first order
+ * @returns {object} breakdown
+ */
 function calculateOrderCashback({ subtotal, totalTax, isFirstOrder }) {
-  const s = SETTINGS;
+  const MIN_ORDER_VALUE = 299;
+  const FIRST_ORDER_EXTRA_DISC = 10; // %
+  const CASHBACK_PCT = 100;          // % of price excl. GST
 
-  // Rule 1: Minimum order value check
-  if (subtotal < s.minOrderValue) {
+  // Rule: minimum order value
+  if (subtotal < MIN_ORDER_VALUE) {
     return {
+      subtotal,
+      totalTax,
+      reason: `Order below ₹${MIN_ORDER_VALUE} — no cashback`,
       cashbackAmount: 0,
-      breakdown: {
-        subtotal,
-        reason: `Order below ₹${s.minOrderValue} — no cashback`,
-      },
+      isFirstOrder,
     };
   }
 
-  // Step 1: Apply first-order 10% extra discount (on subtotal, tax-inclusive)
+  // Step 1: Apply first-order 10% extra discount (on tax-inclusive subtotal)
   let discountedPrice = subtotal;
   let firstOrderDiscountAmt = 0;
 
   if (isFirstOrder) {
-    firstOrderDiscountAmt = parseFloat(
-      (subtotal * (s.firstOrderExtraDisc / 100)).toFixed(2)
-    );
+    firstOrderDiscountAmt = parseFloat((subtotal * (FIRST_ORDER_EXTRA_DISC / 100)).toFixed(2));
     discountedPrice = parseFloat((subtotal - firstOrderDiscountAmt).toFixed(2));
   }
 
-  // Step 2: Deduct actual GST (from Shopify's total_tax field)
-  // Shopify sends total_tax proportional to the full subtotal.
-  // If a discount was applied we scale the tax proportionally.
+  // Step 2: Scale tax proportionally if first-order discount was applied
   let scaledTax = totalTax;
   if (isFirstOrder && subtotal > 0) {
     scaledTax = parseFloat(((totalTax / subtotal) * discountedPrice).toFixed(2));
   }
 
+  // Step 3: Price excluding GST
   const priceExclGst = parseFloat((discountedPrice - scaledTax).toFixed(2));
 
-  // Step 3: Cashback = 100% of price excl. GST
-  const cashbackPct = isFirstOrder
-    ? s.firstOrderCashbackPct
-    : s.repeatCashbackPct;
-
-  const cashbackAmount = parseFloat(
-    (priceExclGst * (cashbackPct / 100)).toFixed(2)
-  );
+  // Step 4: Cashback = 100% of price excl. GST
+  const cashbackAmount = parseFloat((priceExclGst * (CASHBACK_PCT / 100)).toFixed(2));
 
   return {
+    subtotal,
+    totalTax,
+    firstOrderDiscount: firstOrderDiscountAmt,
+    discountedPrice,
+    scaledTax,
+    priceExclGst,
+    cashbackPct: CASHBACK_PCT,
     cashbackAmount: Math.max(0, cashbackAmount),
-    breakdown: {
-      subtotal,
-      firstOrderDiscount: firstOrderDiscountAmt,
-      discountedPrice,
-      shopifyTax: totalTax,
-      scaledTax,
-      priceExclGst,
-      cashbackPct,
-      cashbackAmount: Math.max(0, cashbackAmount),
-      isFirstOrder,
-    },
+    isFirstOrder,
   };
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// calculateWalletUsage()
-//
-// For 2nd+ orders: customer can use the HIGHER of:
-//   Option A → 40% of product value excl. GST
-//   Option B → 33% of current wallet balance
-//
-// First order: no wallet usage allowed (cashback is being earned, not spent)
-//
-// @param {object} params
-//   - productPrice   {number}  product subtotal (tax-inclusive)
-//   - totalTax       {number}  actual GST from Shopify
-//   - walletBalance  {number}  customer's current wallet balance
-//   - isFirstOrder   {boolean}
-//
-// @returns {object}
-//   - maxUsable      {number}  max wallet amount customer can apply
-//   - optionA        {number}  40% of product excl. GST
-//   - optionB        {number}  33% of wallet balance
-//   - recommended    {string}  which option gives more
-// ─────────────────────────────────────────────────────────────────────────────
+/**
+ * Calculate how much wallet credit can be applied to an order.
+ *
+ * Rules (for 2nd+ orders only):
+ *  - Option A: 40% of product value excl. GST
+ *  - Option B: 33% of current wallet balance
+ *  - Customer gets the HIGHER of the two options
+ *  - Cannot exceed actual wallet balance
+ *  - First order: wallet cannot be used
+ *
+ * @param {object} params
+ * @param {number}  params.productPrice   - Product subtotal (tax-inclusive)
+ * @param {number}  params.totalTax       - Actual GST from Shopify
+ * @param {number}  params.walletBalance  - Customer's current wallet balance
+ * @param {boolean} params.isFirstOrder
+ * @returns {object}
+ */
 function calculateWalletUsage({ productPrice, totalTax, walletBalance, isFirstOrder }) {
-  const s = SETTINGS;
-
   if (isFirstOrder) {
     return {
-      maxUsable: 0,
+      walletUsable: 0,
       optionA: 0,
       optionB: 0,
-      recommended: null,
-      reason: 'Wallet cannot be used on first order',
+      reason: "Wallet cannot be used on first order",
     };
   }
 
   const productExclGst = parseFloat((productPrice - totalTax).toFixed(2));
 
-  const optionA = parseFloat(
-    (productExclGst * (s.walletUsagePctOfProduct / 100)).toFixed(2)
-  );
-  const optionB = parseFloat(
-    (walletBalance * (s.walletUsagePctOfBalance / 100)).toFixed(2)
-  );
+  const optionA = parseFloat((productExclGst * 0.40).toFixed(2)); // 40% of product excl. GST
+  const optionB = parseFloat((walletBalance  * 0.33).toFixed(2)); // 33% of wallet balance
 
-  const maxUsable = parseFloat(Math.max(optionA, optionB).toFixed(2));
-  // Cannot use more than actual wallet balance
-  const finalUsable = parseFloat(Math.min(maxUsable, walletBalance).toFixed(2));
+  // Customer gets the HIGHER option, capped at actual balance
+  const maxUsable = parseFloat(Math.min(Math.max(optionA, optionB), walletBalance).toFixed(2));
 
   return {
-    maxUsable: finalUsable,
+    walletUsable: maxUsable,
+    walletBalance: parseFloat(walletBalance.toFixed(2)),
     optionA,
     optionB,
-    recommended: optionA >= optionB ? 'A' : 'B',
-    breakdown: {
-      productPrice,
-      totalTax,
-      productExclGst,
-      walletBalance,
-      optionA_desc: `${s.walletUsagePctOfProduct}% of ₹${productExclGst} (product excl. GST)`,
-      optionB_desc: `${s.walletUsagePctOfBalance}% of ₹${walletBalance} (wallet balance)`,
-    },
+    optionA_desc: `40% of ₹${productExclGst} (product excl. GST)`,
+    optionB_desc: `33% of ₹${walletBalance} (wallet balance)`,
+    limitingFactor: optionA >= optionB ? "product_value_limit" : "balance_limit",
+    recommended: optionA >= optionB ? "A" : "B",
   };
 }
 
-module.exports = { calculateOrderCashback, calculateWalletUsage, SETTINGS };
+// ── DB Write Functions ────────────────────────────────────────────────────────
+
+/**
+ * Award cashback to a customer's wallet after order is paid.
+ * Creates a new CashbackBatch and a EARN transaction.
+ */
+async function awardCashback({ shopId, customerId, customerEmail, orderId, orderName, orderType, cashbackAmount, cashbackValidDays }) {
+  return prisma.$transaction(async (tx) => {
+    const wallet = await getOrCreateWallet(shopId, customerId, customerEmail);
+    const currentBalance = await getWalletBalance(wallet.id);
+
+    const expiresAt = new Date();
+    expiresAt.setDate(expiresAt.getDate() + cashbackValidDays);
+
+    const batch = await tx.cashbackBatch.create({
+      data: {
+        batchRef: generateBatchRef(),
+        walletId: wallet.id,
+        orderId,
+        orderName,
+        orderType,
+        originalAmount: cashbackAmount,
+        expiresAt,
+        status: "ACTIVE",
+      },
+    });
+
+    await tx.walletTransaction.create({
+      data: {
+        walletId: wallet.id,
+        batchId: batch.id,
+        type: "EARN",
+        amount: cashbackAmount,
+        balanceBefore: currentBalance,
+        balanceAfter: currentBalance + cashbackAmount,
+        orderId,
+        orderName,
+        note: `Cashback earned from order ${orderName}`,
+      },
+    });
+
+    await tx.wallet.update({
+      where: { id: wallet.id },
+      data: { totalEarned: { increment: cashbackAmount } },
+    });
+
+    logger.info(`Cashback awarded: ${cashbackAmount} to wallet ${wallet.id} (batch ${batch.batchRef})`);
+    return { wallet, batch };
+  });
+}
+
+/**
+ * Redeem cashback from wallet — deducts from oldest batches first (FIFO).
+ * Creates a USE transaction per batch touched.
+ */
+async function redeemCashback({ shopId, customerId, orderId, orderName, amountToUse }) {
+  return prisma.$transaction(async (tx) => {
+    const wallet = await tx.wallet.findUnique({
+      where: { shopId_customerId: { shopId, customerId } },
+    });
+    if (!wallet) throw Object.assign(new Error("Wallet not found"), { status: 404 });
+
+    const currentBalance = await getWalletBalance(wallet.id);
+    if (amountToUse > currentBalance) {
+      throw Object.assign(
+        new Error(`Insufficient balance. Available: ${currentBalance}, Requested: ${amountToUse}`),
+        { status: 400 }
+      );
+    }
+
+    const batches = await tx.cashbackBatch.findMany({
+      where: {
+        walletId: wallet.id,
+        status: { in: ["ACTIVE", "PARTIALLY_USED"] },
+        expiresAt: { gt: new Date() },
+      },
+      orderBy: { expiresAt: "asc" },
+    });
+
+    let remaining = amountToUse;
+
+    for (const batch of batches) {
+      if (remaining <= 0) break;
+
+      const available = batch.originalAmount - batch.usedAmount - batch.expiredAmount;
+      const deduct = Math.min(available, remaining);
+
+      const newUsed = batch.usedAmount + deduct;
+      const fullyUsed = newUsed >= batch.originalAmount - batch.expiredAmount - 0.001;
+
+      await tx.cashbackBatch.update({
+        where: { id: batch.id },
+        data: {
+          usedAmount: newUsed,
+          status: fullyUsed ? "FULLY_USED" : "PARTIALLY_USED",
+        },
+      });
+
+      await tx.walletTransaction.create({
+        data: {
+          walletId: wallet.id,
+          batchId: batch.id,
+          type: "USE",
+          amount: deduct,
+          balanceBefore: currentBalance,
+          balanceAfter: currentBalance - amountToUse,
+          orderId,
+          orderName,
+          note: `Used from batch ${batch.batchRef} for order ${orderName}`,
+        },
+      });
+
+      remaining -= deduct;
+    }
+
+    await tx.wallet.update({
+      where: { id: wallet.id },
+      data: { totalUsed: { increment: amountToUse } },
+    });
+
+    logger.info(`Cashback redeemed: ${amountToUse} from wallet ${wallet.id}`);
+    return { amountUsed: amountToUse, newBalance: currentBalance - amountToUse };
+  });
+}
+
+// ── Query Functions ───────────────────────────────────────────────────────────
+
+async function getWalletSummary({ shopId, customerId }) {
+  const wallet = await prisma.wallet.findUnique({
+    where: { shopId_customerId: { shopId, customerId } },
+    include: {
+      batches: { orderBy: { earnedAt: "desc" }, take: 50 },
+      transactions: { orderBy: { createdAt: "desc" }, take: 50 },
+    },
+  });
+
+  if (!wallet) {
+    return { exists: false, balance: 0, batches: [], transactions: [] };
+  }
+
+  const now = new Date();
+  const activeBatches = wallet.batches.filter(
+    (b) => ["ACTIVE", "PARTIALLY_USED"].includes(b.status) && b.expiresAt > now
+  );
+
+  const balance = activeBatches.reduce(
+    (sum, b) => sum + (b.originalAmount - b.usedAmount - b.expiredAmount),
+    0
+  );
+
+  return {
+    exists: true,
+    walletId: wallet.id,
+    balance: parseFloat(balance.toFixed(2)),
+    totalEarned: wallet.totalEarned,
+    totalUsed: wallet.totalUsed,
+    totalExpired: wallet.totalExpired,
+    activeBatches: activeBatches.map((b) => ({
+      id: b.id,
+      batchRef: b.batchRef,
+      orderName: b.orderName,
+      orderType: b.orderType,
+      originalAmount: b.originalAmount,
+      remaining: parseFloat((b.originalAmount - b.usedAmount - b.expiredAmount).toFixed(2)),
+      earnedAt: b.earnedAt,
+      expiresAt: b.expiresAt,
+      daysLeft: Math.max(0, Math.ceil((b.expiresAt - now) / (1000 * 60 * 60 * 24))),
+      status: b.status,
+    })),
+    transactions: wallet.transactions.map((t) => ({
+      id: t.id,
+      type: t.type,
+      amount: t.amount,
+      balanceBefore: t.balanceBefore,
+      balanceAfter: t.balanceAfter,
+      orderName: t.orderName,
+      note: t.note,
+      createdAt: t.createdAt,
+    })),
+  };
+}
+
+async function isFirstOrder({ shopId, customerId }) {
+  const wallet = await prisma.wallet.findUnique({
+    where: { shopId_customerId: { shopId, customerId } },
+    include: { batches: { take: 1 } },
+  });
+  return !wallet || wallet.batches.length === 0;
+}
+
+module.exports = {
+  getSettings,
+  getOrCreateWallet,
+  getWalletBalance,
+  calculateOrderCashback,
+  calculateWalletUsage,
+  awardCashback,
+  redeemCashback,
+  getWalletSummary,
+  isFirstOrder,
+};
