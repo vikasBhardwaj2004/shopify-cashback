@@ -1,115 +1,147 @@
 // src/services/order.service.js
 // ─────────────────────────────────────────────────────────────────────────────
 // Handles the full order lifecycle:
-//   handleOrderPaid() → called by orders/paid webhook
-//     - checks first-order status
-//     - awards cashback using ACTUAL Shopify tax data
-//     - records transaction in DB
+//   handleOrderPaid()  → called by orders/paid webhook
+//                         - checks first-order status
+//                         - awards cashback
+//   handleOrderRefund() → partial cashback reversal on refund
 // ─────────────────────────────────────────────────────────────────────────────
 
-const db = require('../config/database');
-const { calculateOrderCashback } = require('./cashback.service');
+const { PrismaClient } = require("@prisma/client");
+const prisma = new PrismaClient();
+const cashbackService = require("./cashback.service");
+const logger = require("../utils/logger");
 
-// ─────────────────────────────────────────────────────────────────────────────
-// handleOrderPaid()
-//
-// Called from webhook when Shopify fires orders/paid event.
-//
-// @param {object} order   Full Shopify order object from webhook payload
-// ─────────────────────────────────────────────────────────────────────────────
-async function handleOrderPaid(order) {
-  const customerId = String(order.customer?.id);
-  const orderId    = String(order.id);
-  const orderName  = order.name; // e.g. "#1215"
+/**
+ * Called when an order is marked as PAID in Shopify.
+ * Awards cashback to the customer's wallet.
+ *
+ * @param {object} params
+ * @param {string} params.shopId     - Internal shop ID
+ * @param {string} params.shopDomain - e.g. mystore.myshopify.com
+ * @param {object} params.order      - Raw Shopify order webhook payload
+ */
+async function handleOrderPaid({ shopId, shopDomain, order }) {
+  const customerId = `gid://shopify/Customer/${order.customer?.id}`;
+  const customerEmail = order.customer?.email || order.email;
+  const orderId = `gid://shopify/Order/${order.id}`;
+  const orderName = order.name; // e.g. #1043
 
-  if (!customerId) {
-    console.log(`[order.service] Skipping order ${orderId} — no customer`);
+  if (!order.customer?.id) {
+    logger.warn(`Order ${orderName} has no customer — skipping cashback`);
     return;
   }
 
-  // ── Prevent duplicate processing ──────────────────────────────────────────
-  const existing = await db.query(
-    'SELECT id FROM cashback_transactions WHERE order_id = $1',
-    [orderId]
-  );
-  if (existing.rows.length > 0) {
-    console.log(`[order.service] Order ${orderId} already processed — skip`);
-    return;
-  }
-
-  // ── Is this the customer's first order? ───────────────────────────────────
-  const prevOrders = await db.query(
-    `SELECT id FROM cashback_transactions
-     WHERE customer_id = $1 AND status = 'completed'
-     ORDER BY created_at ASC`,
-    [customerId]
-  );
-  const isFirstOrder = prevOrders.rows.length === 0;
+  // Determine if this is the customer's first order
+  const firstOrder = await cashbackService.isFirstOrder({ shopId, customerId });
 
   // ── Extract financial data from Shopify webhook ───────────────────────────
-  // subtotal_price = product total (excl. shipping), tax-inclusive
-  // total_tax      = actual GST charged by Shopify
-  // Shopify sends these as strings — parse to float
-  const subtotal = parseFloat(order.subtotal_price || '0');
-  const totalTax = parseFloat(order.total_tax      || '0');
+  // subtotal_price = product total (tax-inclusive), Shopify sends as string
+  // total_tax      = actual GST charged by Shopify, also a string
+  const subtotal = parseFloat(order.subtotal_price || "0");
+  const totalTax = parseFloat(order.total_tax || "0");
 
-  console.log(`[order.service] Order ${orderName} | subtotal: ₹${subtotal} | tax: ₹${totalTax} | firstOrder: ${isFirstOrder}`);
+  logger.info(`Order ${orderName} | subtotal: ₹${subtotal} | tax: ₹${totalTax} | firstOrder: ${firstOrder}`);
 
   // ── Calculate cashback ────────────────────────────────────────────────────
-  const { cashbackAmount, breakdown } = calculateOrderCashback({
+  const { cashbackAmount, breakdown } = cashbackService.calculateOrderCashback({
     subtotal,
     totalTax,
-    isFirstOrder,
+    isFirstOrder: firstOrder,
   });
 
-  console.log(`[order.service] Cashback for ${orderName}:`, breakdown);
+  logger.info(`Order ${orderName} cashback breakdown`, {
+    customerId,
+    firstOrder,
+    cashbackAmount,
+    breakdown,
+  });
 
   if (cashbackAmount <= 0) {
-    console.log(`[order.service] No cashback for order ${orderName} — ${breakdown.reason || 'amount is 0'}`);
+    logger.info(`No cashback for order ${orderName} — ${breakdown.reason || "amount is 0"}`);
     return;
   }
 
-  // ── Award cashback to wallet ───────────────────────────────────────────────
-  const expiresAt = new Date();
-  expiresAt.setDate(expiresAt.getDate() + 30); // 30-day expiry
+  // ── Award cashback ────────────────────────────────────────────────────────
+  const settings = await cashbackService.getSettings(shopId);
 
-  await db.query('BEGIN');
-  try {
-    // 1. Insert cashback transaction record
-    await db.query(
-      `INSERT INTO cashback_transactions
-         (customer_id, order_id, order_name, amount, status,
-          is_first_order, subtotal, tax_amount, breakdown, expires_at)
-       VALUES ($1,$2,$3,$4,'completed',$5,$6,$7,$8,$9)`,
-      [
-        customerId,
-        orderId,
-        orderName,
-        cashbackAmount,
-        isFirstOrder,
-        subtotal,
-        totalTax,
-        JSON.stringify(breakdown),
-        expiresAt,
-      ]
-    );
+  const { wallet, batch } = await cashbackService.awardCashback({
+    shopId,
+    customerId,
+    customerEmail,
+    orderId,
+    orderName,
+    orderType: firstOrder ? "FIRST" : "REPEAT",
+    cashbackAmount,
+    cashbackValidDays: settings.cashbackValidDays,
+  });
 
-    // 2. Update or create wallet balance
-    await db.query(
-      `INSERT INTO wallets (customer_id, balance)
-       VALUES ($1, $2)
-       ON CONFLICT (customer_id)
-       DO UPDATE SET balance = wallets.balance + $2, updated_at = NOW()`,
-      [customerId, cashbackAmount]
-    );
+  logger.info(
+    `Cashback batch ${batch.batchRef} created: ₹${cashbackAmount} for ${customerEmail} (expires ${batch.expiresAt.toISOString()})`
+  );
 
-    await db.query('COMMIT');
-    console.log(`[order.service] ✅ Cashback ₹${cashbackAmount} awarded to customer ${customerId}`);
-  } catch (err) {
-    await db.query('ROLLBACK');
-    console.error(`[order.service] ❌ Failed to award cashback:`, err);
-    throw err;
-  }
+  return { wallet, batch, breakdown };
 }
 
-module.exports = { handleOrderPaid };
+/**
+ * Called when an order is refunded.
+ * Attempts to reverse cashback earned on that order.
+ * Only reverses if the cashback batch still has unused balance.
+ */
+async function handleOrderRefund({ shopId, order, refundAmount }) {
+  const customerId = `gid://shopify/Customer/${order.customer?.id}`;
+  if (!customerId) return;
+
+  const wallet = await prisma.wallet.findUnique({
+    where: { shopId_customerId: { shopId, customerId } },
+    include: {
+      batches: {
+        where: { orderId: `gid://shopify/Order/${order.id}` },
+      },
+    },
+  });
+
+  if (!wallet || wallet.batches.length === 0) return;
+
+  const batch = wallet.batches[0];
+  const refundable = batch.originalAmount - batch.usedAmount - batch.expiredAmount;
+  const toReverse = Math.min(refundable, refundAmount);
+
+  if (toReverse <= 0) {
+    logger.info(`No reversible cashback for order ${order.name}`);
+    return;
+  }
+
+  await prisma.$transaction(async (tx) => {
+    await tx.cashbackBatch.update({
+      where: { id: batch.id },
+      data: {
+        expiredAmount: { increment: toReverse },
+        status: toReverse >= refundable ? "FULLY_USED" : "PARTIALLY_USED",
+      },
+    });
+
+    await tx.walletTransaction.create({
+      data: {
+        walletId: wallet.id,
+        batchId: batch.id,
+        type: "EXPIRE",
+        amount: toReverse,
+        balanceBefore: refundable,
+        balanceAfter: refundable - toReverse,
+        orderId: `gid://shopify/Order/${order.id}`,
+        orderName: order.name,
+        note: `Cashback reversed due to refund on order ${order.name}`,
+      },
+    });
+
+    await tx.wallet.update({
+      where: { id: wallet.id },
+      data: { totalExpired: { increment: toReverse } },
+    });
+  });
+
+  logger.info(`Reversed ₹${toReverse} cashback for order ${order.name}`);
+}
+
+module.exports = { handleOrderPaid, handleOrderRefund };
