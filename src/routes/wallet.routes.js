@@ -46,13 +46,17 @@ router.get("/:customerId", async (req, res) => {
 });
 
 // ── GET /api/wallet/:customerId/calculate ─────────────────────────────────────
-// Preview: given a cart MRP total, returns:
-//  - discounted price the customer will pay
-//  - how much wallet balance they can apply
-//  - cashback they'll earn
+// Preview: given cart subtotal + actual tax from Shopify, returns:
+//  - cashback customer will earn
+//  - how much wallet balance they can apply (Option A vs Option B)
+//  - final amount payable after wallet deduction
+//
+// Query params:
+//   subtotal  → cart subtotal (tax-inclusive, from Shopify)
+//   totalTax  → actual GST amount from Shopify (not assumed)
 const calculateSchema = z.object({
-  mrpTotal: z.coerce.number().positive(),
-  gstRate: z.coerce.number().min(0).max(100).optional(),
+  subtotal: z.coerce.number().positive(),
+  totalTax: z.coerce.number().min(0),
 });
 
 router.get("/:customerId/calculate", async (req, res) => {
@@ -62,13 +66,14 @@ router.get("/:customerId/calculate", async (req, res) => {
     return res.status(400).json({ error: parsed.error.flatten() });
   }
 
-  const { mrpTotal, gstRate } = parsed.data;
+  const { subtotal, totalTax } = parsed.data;
   const { customerId } = req.params;
   const decodedCustomerId = decodeURIComponent(customerId);
 
-  const settings = await cashbackService.getSettings(shopId);
-  const firstOrder = await cashbackService.isFirstOrder({ shopId, customerId: decodedCustomerId });
-  const gstDecimal = (gstRate ?? settings.defaultGstRate) / 100;
+  const isFirstOrder = await cashbackService.isFirstOrder({
+    shopId,
+    customerId: decodedCustomerId,
+  });
 
   // Get current wallet balance
   const walletSummary = await cashbackService.getWalletSummary({
@@ -76,36 +81,51 @@ router.get("/:customerId/calculate", async (req, res) => {
     customerId: decodedCustomerId,
   });
 
+  const walletBalance = walletSummary.balance || 0;
+
+  // Calculate cashback to be earned
   const orderCalc = cashbackService.calculateOrderCashback({
-    mrpTotal,
-    gstRate: gstDecimal,
-    isFirstOrder: firstOrder,
-    settings,
+    subtotal,
+    totalTax,
+    isFirstOrder,
   });
 
+  // Calculate how much wallet can be used (only for 2nd+ orders)
   const walletCalc = cashbackService.calculateWalletUsage({
-    priceBeforeGst: orderCalc.priceBeforeGst,
-    walletBalance: walletSummary.balance || 0,
-    settings,
+    productPrice: subtotal,
+    totalTax,
+    walletBalance,
+    isFirstOrder,
   });
 
-  const finalPayableAfterWallet = parseFloat(
-    (orderCalc.priceBeforeGst - walletCalc.walletUsable + orderCalc.gstAmount).toFixed(2)
+  // Final amount customer pays after wallet deduction
+  const finalPayable = parseFloat(
+    (subtotal - walletCalc.maxUsable).toFixed(2)
   );
 
   res.json({
-    isFirstOrder: firstOrder,
-    order: orderCalc,
+    isFirstOrder,
+    order: {
+      subtotal,
+      totalTax,
+      priceExclGst: parseFloat((subtotal - totalTax).toFixed(2)),
+      cashbackEarned: orderCalc.cashbackAmount,
+      breakdown: orderCalc.breakdown,
+    },
     wallet: {
-      currentBalance: walletSummary.balance,
-      walletUsable: walletCalc.walletUsable,
-      limitingFactor: walletCalc.limitingFactor,
+      currentBalance: walletBalance,
+      optionA: walletCalc.optionA,
+      optionA_desc: `40% of product excl. GST`,
+      optionB: walletCalc.optionB,
+      optionB_desc: `33% of wallet balance (₹${walletBalance})`,
+      maxUsable: walletCalc.maxUsable,
+      recommended: walletCalc.recommended,
     },
     summary: {
-      youPay: finalPayableAfterWallet,
+      youPay: finalPayable,
+      walletApplied: walletCalc.maxUsable,
       cashbackYouEarn: orderCalc.cashbackAmount,
-      walletApplied: walletCalc.walletUsable,
-      cashbackValidDays: settings.cashbackValidDays,
+      cashbackValidDays: 30,
     },
   });
 });
