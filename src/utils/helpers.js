@@ -1,14 +1,14 @@
 // src/utils/helpers.js
 
-let batchCounter = 1000;
-
 /**
- * Generate a unique batch reference like CB-1042.
- * In production, use a DB sequence or UUID instead.
+ * Generate a unique batch reference.
+ * Uses timestamp + random to avoid collision on server restart.
+ * Example: CB-17488344-x7k2
  */
 function generateBatchRef() {
-  batchCounter++;
-  return `CB-${batchCounter}`;
+  const ts = Date.now().toString(36).toUpperCase();         // e.g. "LXKR92"
+  const rand = Math.random().toString(36).slice(2, 6).toUpperCase(); // e.g. "K3F1"
+  return `CB-${ts}-${rand}`;
 }
 
 /**
