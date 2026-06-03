@@ -77,12 +77,7 @@ async function getWalletBalance(walletId) {
  * @param {boolean} params.isFirstOrder  - Whether this is the customer's first order
  * @returns {object} breakdown
  */
-function calculateOrderCashback({
-  subtotal,
-  totalTax,
-  gstRate = 0,
-  isFirstOrder
-}) {
+function calculateOrderCashback({ subtotal, totalTax, isFirstOrder }) {
   const MIN_ORDER_VALUE = 299;
   const FIRST_ORDER_EXTRA_DISC = 10; // %
   const CASHBACK_PCT = 100;          // % of price excl. GST
@@ -114,21 +109,7 @@ function calculateOrderCashback({
   }
 
   // Step 3: Price excluding GST
-  // const priceExclGst = parseFloat((discountedPrice - scaledTax).toFixed(2));
-  
-  let priceExclGst;
-
-if (totalTax > 0) {
-  priceExclGst = parseFloat(
-    (discountedPrice - scaledTax).toFixed(2)
-  );
-} else if (gstRate > 0) {
-  priceExclGst = parseFloat(
-    (discountedPrice / (1 + gstRate)).toFixed(2)
-  );
-} else {
-  priceExclGst = discountedPrice;
-}
+  const priceExclGst = parseFloat((discountedPrice - scaledTax).toFixed(2));
 
   // Step 4: Cashback = 100% of price excl. GST
   const cashbackAmount = parseFloat((priceExclGst * (CASHBACK_PCT / 100)).toFixed(2));
