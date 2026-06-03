@@ -120,9 +120,9 @@ function calculateOrderCashback({ subtotal, totalTax, isFirstOrder }) {
  * Calculate how much wallet credit can be applied to an order.
  *
  * Rules (for 2nd+ orders only):
- *  - Option A: 40% of product value excl. GST
+ *  - Option A: 50% of order value (GST included)
  *  - Option B: 33% of current wallet balance
- *  - Customer gets the HIGHER of the two options
+ *  - Customer gets the LESSER of the two options
  *  - Cannot exceed actual wallet balance
  *  - First order: wallet cannot be used
  *
@@ -143,23 +143,21 @@ function calculateWalletUsage({ productPrice, totalTax, walletBalance, isFirstOr
     };
   }
 
-  const productExclGst = parseFloat((productPrice - totalTax).toFixed(2));
+  const optionA = parseFloat((productPrice * 0.50).toFixed(2)); // 50% of order value (GST included)
+  const optionB = parseFloat((walletBalance * 0.33).toFixed(2)); // 33% of wallet balance
 
-  const optionA = parseFloat((productExclGst * 0.40).toFixed(2)); // 40% of product excl. GST
-  const optionB = parseFloat((walletBalance  * 0.33).toFixed(2)); // 33% of wallet balance
-
-  // Customer gets the HIGHER option, capped at actual balance
-  const maxUsable = parseFloat(Math.min(Math.max(optionA, optionB), walletBalance).toFixed(2));
+  // Customer gets the LESSER option, capped at actual balance
+  const maxUsable = parseFloat(Math.min(optionA, optionB, walletBalance).toFixed(2));
 
   return {
     walletUsable: maxUsable,
     walletBalance: parseFloat(walletBalance.toFixed(2)),
     optionA,
     optionB,
-    optionA_desc: `40% of ₹${productExclGst} (product excl. GST)`,
+    optionA_desc: `50% of ₹${productPrice} (order value incl. GST)`,
     optionB_desc: `33% of ₹${walletBalance} (wallet balance)`,
-    limitingFactor: optionA >= optionB ? "product_value_limit" : "balance_limit",
-    recommended: optionA >= optionB ? "A" : "B",
+    limitingFactor: optionA <= optionB ? "order_value_limit" : "balance_limit",
+    recommended: optionA <= optionB ? "A" : "B",
   };
 }
 
