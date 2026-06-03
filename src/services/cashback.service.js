@@ -67,9 +67,9 @@ async function getWalletBalance(walletId) {
  * Rules:
  *  - No cashback if subtotal < ₹299
  *  - No 30% discount here — Shopify handles discounts
- *  - First order: 10% extra discount applied, then cashback on price excl. GST
- *  - Repeat orders: cashback directly on price excl. GST (no extra discount)
- *  - GST deducted using Shopify's actual total_tax (no assumption)
+ *  - First order: 10% extra discount applied, then cashback on discounted price (GST included)
+ *  - Repeat orders: cashback directly on subtotal (GST included)
+ *  - GST is NOT deducted — cashback is calculated on the full price including GST
  *
  * @param {object} params
  * @param {number}  params.subtotal      - Order subtotal from Shopify (tax-inclusive)
@@ -80,7 +80,7 @@ async function getWalletBalance(walletId) {
 function calculateOrderCashback({ subtotal, totalTax, isFirstOrder }) {
   const MIN_ORDER_VALUE = 299;
   const FIRST_ORDER_EXTRA_DISC = 10; // %
-  const CASHBACK_PCT = 100;          // % of price excl. GST
+  const CASHBACK_PCT = 100;          // % of discounted price (GST included)
 
   // Rule: minimum order value
   if (subtotal < MIN_ORDER_VALUE) {
@@ -102,25 +102,14 @@ function calculateOrderCashback({ subtotal, totalTax, isFirstOrder }) {
     discountedPrice = parseFloat((subtotal - firstOrderDiscountAmt).toFixed(2));
   }
 
-  // Step 2: Scale tax proportionally if first-order discount was applied
-  let scaledTax = totalTax;
-  if (isFirstOrder && subtotal > 0) {
-    scaledTax = parseFloat(((totalTax / subtotal) * discountedPrice).toFixed(2));
-  }
-
-  // Step 3: Price excluding GST
-  const priceExclGst = parseFloat((discountedPrice - scaledTax).toFixed(2));
-
-  // Step 4: Cashback = 100% of price excl. GST
-  const cashbackAmount = parseFloat((priceExclGst * (CASHBACK_PCT / 100)).toFixed(2));
+  // Step 2: Cashback = 100% of discountedPrice (GST included — not deducted)
+  const cashbackAmount = parseFloat((discountedPrice * (CASHBACK_PCT / 100)).toFixed(2));
 
   return {
     subtotal,
     totalTax,
     firstOrderDiscount: firstOrderDiscountAmt,
     discountedPrice,
-    scaledTax,
-    priceExclGst,
     cashbackPct: CASHBACK_PCT,
     cashbackAmount: Math.max(0, cashbackAmount),
     isFirstOrder,
